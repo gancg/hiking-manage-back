@@ -1,0 +1,3 @@
+1.有新的controller生成时，将新的接口更新到/interface-document目录下面的接口文档里
+2.新接口生成或者改动时，请对应生成相应的测试类，放到test目录下，按照controller目录的结构生成测试类（比如AuthController对应AuthControllerTest）
+3.接口或代码有变动时，需要跑对应的测试用例
