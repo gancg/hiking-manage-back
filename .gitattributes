@@ -1,2 +1,6 @@
 /mvnw text eol=lf
 *.cmd text eol=crlf
+# Linux 部署脚本使用 LF 换行
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

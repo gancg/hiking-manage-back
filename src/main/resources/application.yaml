@@ -3,7 +3,8 @@ spring:
     name: hiking-manage-back
   datasource:
     driver-class-name: org.sqlite.JDBC
-    url: jdbc:sqlite:data/chatbi.db
+    # 通过环境变量指定数据库连接地址，可指向容器间共享的数据文件
+    url: ${SPRING_DATASOURCE_URL}
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
