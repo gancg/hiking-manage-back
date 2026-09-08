@@ -1,0 +1,145 @@
+name: 构建镜像并部署 ECS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}@${{ steps.publish.outputs.digest }}
+    steps:
+      - name: 检出项目
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: 安装 Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # 测试使用独立配置，不读取生产密钥和本地数据库。
+      - name: 运行测试并打包
+        env:
+          JWT_SECRET: ci-only-signing-key-not-for-production-2026
+          AUTH_DEFAULT_PASSWORD: ci-only-password
+          SPRING_DATASOURCE_URL: 'jdbc:sqlite::memory:'
+          SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: '1'
+        run: mvn -B -ntp verify
+
+      - name: 设置镜像名称
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 配置镜像构建工具
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 每次推送独立构建，使用提交 SHA 标识版本，部署时使用镜像摘要。
+      - name: 构建并发布镜像
+        id: publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 显示发布结果
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          echo "镜像：$IMAGE:sha-$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "部署地址：$IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: build
+    if: vars.ECS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: ecs-production
+      cancel-in-progress: false
+    env:
+      ECS_HOST: ${{ secrets.ECS_HOST }}
+      ECS_USER: ${{ secrets.ECS_USER }}
+      ECS_SSH_PORT: ${{ vars.ECS_SSH_PORT }}
+      IMAGE: ${{ needs.build.outputs.image }}
+    steps:
+      - name: 检出部署配置
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # 排队的旧版本不覆盖 main 上更新的版本。
+      - name: 检查是否仍为 main 最新提交
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [ "$head_sha" = "$GITHUB_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "已有更新的 main 提交，本次镜像已发布，跳过部署。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 配置服务器连接
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ECS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.ECS_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${ECS_HOST:?请配置 ECS_HOST}"
+          : "${ECS_USER:?请配置 ECS_USER}"
+          : "${ECS_SSH_PORT:?请配置 ECS_SSH_PORT}"
+          : "${SSH_PRIVATE_KEY:?请配置 ECS_SSH_PRIVATE_KEY}"
+          : "${SSH_KNOWN_HOSTS:?请配置 ECS_SSH_KNOWN_HOSTS}"
+          [[ "$ECS_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          [[ "$ECS_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]
+          [[ "$ECS_SSH_PORT" =~ ^[0-9]+$ ]]
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: 更新阿里云服务
+        if: steps.current.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15)
+          ssh "${ssh_options[@]}" -p "$ECS_SSH_PORT" "$ECS_USER@$ECS_HOST" 'test -d /opt/hiking-manage-back'
+          scp "${ssh_options[@]}" -P "$ECS_SSH_PORT" deploy/compose.yaml deploy/deploy.sh "$ECS_USER@$ECS_HOST:/opt/hiking-manage-back/"
+          ssh "${ssh_options[@]}" -p "$ECS_SSH_PORT" "$ECS_USER@$ECS_HOST" "bash /opt/hiking-manage-back/deploy.sh '$IMAGE'"
+
+      - name: 清理临时 SSH 凭据
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts

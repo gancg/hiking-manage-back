@@ -1,0 +1,33 @@
+name: hiking-manage-back
+
+services:
+  app:
+    image: ${APP_IMAGE:?请通过部署脚本指定镜像}
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:?请设置 SPRING_DATASOURCE_URL}
+      JWT_SECRET: ${JWT_SECRET:?请设置 JWT_SECRET}
+      AUTH_DEFAULT_PASSWORD: ${AUTH_DEFAULT_PASSWORD:?请设置 AUTH_DEFAULT_PASSWORD}
+    volumes:
+      - hiking-data:/app/data
+    # 检查应用端口是否已监听；业务可用性仍需结合接口验证。
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # 首次部署前准备好数据库数据卷，更新镜像时复用。
+  hiking-data:
+    external: true
+    name: hiking-data
