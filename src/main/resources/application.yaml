@@ -14,7 +14,8 @@ server:
 jwt:
   # 通过环境变量提供 JWT 签名密钥
   secret: ${JWT_SECRET}
-  expire-minutes: 1
+  # 通过环境变量指定 JWT 有效期，单位为分钟
+  expire-minutes: ${JWT_EXPIRE_MINUTES}
 auth:
   # 通过环境变量提供新用户的默认密码
   default-password: ${AUTH_DEFAULT_PASSWORD}
